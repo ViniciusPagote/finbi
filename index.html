@@ -204,11 +204,74 @@ body.privacy-mode .sensitive:hover{
   border-color: rgba(139,92,246,.5);
   color: var(--purple);
 }
+
+/* LOGIN SCREEN */
+#login-screen {
+  position: fixed; inset: 0; z-index: 9999;
+  background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+}
+#login-screen.hidden { display: none; }
+.login-box {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  padding: 40px 44px;
+  width: 100%; max-width: 360px;
+  box-shadow: 0 24px 64px rgba(0,0,0,.6);
+}
+.login-logo {
+  font-family: var(--mono); font-size: 22px; font-weight: 500;
+  letter-spacing: 4px; text-align: center; margin-bottom: 8px;
+}
+.login-logo span { color: var(--accent); }
+.login-sub {
+  text-align: center; font-size: 12px; color: var(--muted);
+  margin-bottom: 32px;
+}
+.login-box input[type=password] {
+  width: 100%; margin-bottom: 12px;
+  font-size: 15px; letter-spacing: 2px; text-align: center;
+  padding: 12px;
+}
+.login-btn {
+  width: 100%; padding: 11px;
+  background: var(--accent); border: none; border-radius: 8px;
+  color: #fff; font-family: var(--sans); font-size: 14px;
+  font-weight: 500; cursor: pointer; transition: background .15s;
+}
+.login-btn:hover { background: #2563eb; }
+.login-error {
+  text-align: center; font-size: 12px; color: var(--red);
+  margin-top: 10px; min-height: 18px;
+}
+.login-hint {
+  text-align: center; font-size: 11px; color: var(--dimmed);
+  margin-top: 16px; line-height: 1.6;
+}
 </style>
 </head>
 <body>
 
 <!-- TOAST -->
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">FIN<span>BI</span></div>
+    <div class="login-sub">Dashboard de Investimentos · Privado</div>
+    <input type="password" id="login-input" placeholder="••••••••"
+      onkeydown="if(event.key==='Enter') verificarSenha()"
+      autofocus autocomplete="current-password">
+    <button class="login-btn" onclick="verificarSenha()">Entrar</button>
+    <div class="login-error" id="login-error"></div>
+    <div class="login-hint">
+      Primeira vez? Defina sua senha em<br>
+      <b>Configurações → Senha de acesso</b>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <!-- MODAL: Nova Transação -->
@@ -3164,49 +3227,63 @@ async function buscarCotacoesAutomatico() {
 }
 
 // ── Smart fetch: direto quando online, proxy quando file:// ──────────────
-function isOnline() {
-  return location.protocol !== 'file:';
-}
-
 function fetchComTimeout(url, ms=10000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   return fetch(url, {signal: ctrl.signal}).finally(() => clearTimeout(timer));
 }
 
-// Fetch direto (sem proxy) para uso quando está num servidor
-async function fetchDireto(url, ms=10000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const r = await fetch(url, {signal: ctrl.signal, mode:'cors'});
-    clearTimeout(timer);
-    return r;
-  } catch(e) {
-    clearTimeout(timer);
-    throw e;
-  }
-}
+// Lista de proxies CORS — tenta o mais rápido que responder
+const CORS_PROXIES = [
+  u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+  u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+  u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+];
 
-// corsGet: direto se online, via proxy se file://
+// corsGet: dispara múltiplos proxies em paralelo, usa o primeiro que responder
 async function corsGet(url, ms=10000) {
-  if (isOnline()) {
-    try {
-      const r = await fetchDireto(url, ms);
-      if (r.ok) {
-        const json = await r.json();
-        return { ok: true, data: json };
-      }
-    } catch(e) { /* fallthrough to proxy */ }
+  // Extrai JSON de qualquer formato de resposta de proxy
+  function extractData(raw) {
+    if (!raw) return null;
+    // allorigins wraps in { contents: "..." }
+    if (raw.contents !== undefined) {
+      try { return JSON.parse(raw.contents); } catch(e) { return raw.contents; }
+    }
+    // codetabs returns direct JSON
+    return raw;
   }
-  // Fallback: proxy allorigins
-  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-  const r = await fetchComTimeout(proxyUrl, ms);
-  if (!r.ok) return { ok: false, data: null };
-  const outer = await r.json();
-  const txt = outer.contents || '{}';
-  try { return { ok: true, data: JSON.parse(txt) }; }
-  catch(e) { return { ok: true, data: txt }; }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let pending = CORS_PROXIES.length;
+
+    function done(result) {
+      if (!settled) {
+        settled = true;
+        resolve(result);
+      }
+    }
+
+    CORS_PROXIES.forEach(makeProxy => {
+      const proxyUrl = makeProxy(url);
+      fetchComTimeout(proxyUrl, ms)
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then(raw => {
+          const data = extractData(raw);
+          if (data !== null) done({ ok: true, data });
+          else throw new Error('empty');
+        })
+        .catch(() => {
+          pending--;
+          if (pending === 0 && !settled) {
+            done({ ok: false, data: null });
+          }
+        });
+    });
+  });
 }
 
 function limparCacheCotacoes() {
@@ -4982,6 +5059,101 @@ function corrigirClassesTransacoes() {
   }
 }
 
+async function salvarNovaSenha() {
+  const nova = document.getElementById('cfg-nova-senha')?.value || '';
+  const conf = document.getElementById('cfg-confirma-senha')?.value || '';
+  const st   = document.getElementById('cfg-senha-status');
+  if (nova !== conf) {
+    if (st) { st.textContent = 'As senhas não coincidem.'; st.style.color = 'var(--red)'; }
+    return;
+  }
+  const ok = await alterarSenha(nova);
+  if (ok && st) { st.textContent = '✔ Senha alterada!'; st.style.color = 'var(--green)'; }
+  if (document.getElementById('cfg-nova-senha'))   document.getElementById('cfg-nova-senha').value = '';
+  if (document.getElementById('cfg-confirma-senha')) document.getElementById('cfg-confirma-senha').value = '';
+}
+
+
+// ═══════════════════════════════════════════════════════
+// LOGIN — proteção por senha (hash SHA-256 local)
+// ═══════════════════════════════════════════════════════
+
+const LOGIN_KEY = 'finbi_pw_hash';
+const SESSION_KEY = 'finbi_session';
+
+async function sha256(str) {
+  const buf = await crypto.subtle.digest('SHA-256',
+    new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function verificarSenha() {
+  const input = document.getElementById('login-input').value;
+  const errEl = document.getElementById('login-error');
+  if (!input) { errEl.textContent = 'Informe a senha.'; return; }
+
+  const storedHash = localStorage.getItem(LOGIN_KEY);
+
+  if (!storedHash) {
+    // Primeira vez — define a senha
+    if (input.length < 4) {
+      errEl.textContent = 'Senha muito curta (mínimo 4 caracteres).';
+      return;
+    }
+    const hash = await sha256(input);
+    localStorage.setItem(LOGIN_KEY, hash);
+    localStorage.setItem(SESSION_KEY, Date.now().toString());
+    document.getElementById('login-screen').classList.add('hidden');
+    errEl.textContent = '';
+    toast('✔ Senha definida! Você está logado.', 'var(--green)');
+    return;
+  }
+
+  const inputHash = await sha256(input);
+  if (inputHash === storedHash) {
+    localStorage.setItem(SESSION_KEY, Date.now().toString());
+    document.getElementById('login-screen').classList.add('hidden');
+    errEl.textContent = '';
+  } else {
+    errEl.textContent = 'Senha incorreta.';
+    document.getElementById('login-input').value = '';
+    document.getElementById('login-input').focus();
+  }
+}
+
+function verificarSessao() {
+  // Sessão válida por 8 horas
+  const ts = localStorage.getItem(SESSION_KEY);
+  if (!ts) return false;
+  const age = Date.now() - parseInt(ts);
+  return age < 8 * 60 * 60 * 1000; // 8h em ms
+}
+
+function checkLogin() {
+  if (verificarSessao()) {
+    document.getElementById('login-screen').classList.add('hidden');
+  }
+  // Se não tem sessão, a tela de login fica visível (padrão)
+}
+
+async function alterarSenha(novaSenha) {
+  if (!novaSenha || novaSenha.length < 4) {
+    toast('Senha muito curta (mínimo 4 caracteres).', 'var(--amber)');
+    return false;
+  }
+  const hash = await sha256(novaSenha);
+  localStorage.setItem(LOGIN_KEY, hash);
+  toast('✔ Senha alterada com sucesso!');
+  return true;
+}
+
+function logout() {
+  localStorage.removeItem(SESSION_KEY);
+  location.reload();
+}
+
+
 // ═══════════════════════════════════════════════════════
 // GITHUB GIST SYNC — armazena DB no Gist privado
 // ═══════════════════════════════════════════════════════
@@ -5211,6 +5383,9 @@ function renderConfig() {
 // ═══════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════
+
+// Verifica sessão antes de mostrar qualquer dado
+checkLogin();
 
 horaAtual(); setInterval(horaAtual, 30000);
 migrarIRDM11();
